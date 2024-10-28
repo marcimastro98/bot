@@ -2,17 +2,16 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
 from cryptography.fernet import Fernet
 import logging
 import time
 import os
 from getpass import getpass
 import sys
+import threading
 
 # Configura logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 def load_or_generate_key():
     """Carica la chiave di crittografia da un file o ne genera una nuova."""
@@ -31,7 +30,6 @@ def load_or_generate_key():
         logging.error(f"Failed to load or create encryption key: {e}")
         sys.exit(1)
 
-
 class WebBot:
     def __init__(self, driver_path):
         options = Options()
@@ -43,11 +41,13 @@ class WebBot:
         try:
             self.driver = webdriver.Chrome(service=Service(driver_path), options=options)
             logging.info("Browser driver initialized successfully.")
+            self.paused = False
+            self.pause_event = threading.Event()
+            self.pause_event.set()
         except Exception as e:
             logging.error(f"Failed to initialize the browser driver: {e}")
             sys.exit(1)
 
-        # Carica o genera una chiave di crittografia
         try:
             self.key = load_or_generate_key()
             self.cipher = Fernet(self.key)
@@ -86,7 +86,6 @@ class WebBot:
         return None, None
 
     def go_to_url(self, url):
-        """Naviga verso l'URL specificato."""
         try:
             logging.info(f"Navigating to {url}")
             self.driver.get(url)
@@ -95,16 +94,13 @@ class WebBot:
             self.close()
 
     def fill_login_form(self, username, password):
-        """Clicca il pulsante login_btn e inserisce username e password nei campi."""
         try:
             self.driver.execute_script("document.getElementById('login_btn').click();")
             time.sleep(2)
             logging.info("Initial login button clicked.")
-
             username_field = self.driver.find_element(By.ID, "field_email")
             username_field.send_keys(username)
             logging.info("Username entered.")
-
             password_field = self.driver.find_element(By.ID, "password")
             password_field.send_keys(password)
             logging.info("Password entered.")
@@ -113,7 +109,6 @@ class WebBot:
             self.close()
 
     def click_login_button(self):
-        """Clicca il pulsante 'Entra' usando jQuery per inviare il modulo."""
         try:
             self.driver.execute_script("$('.btlogin').click();")
             logging.info("Login 'Entra' button clicked using jQuery.")
@@ -121,64 +116,49 @@ class WebBot:
             logging.error(f"Failed to click login button: {e}")
             self.close()
 
-    def monitor_counter_and_click(self, counter_by, counter_value,link, s, target="1"):
+    def pause(self):
+        """Mette in pausa il bot."""
+        self.paused = True
+        self.pause_event.clear()
+        logging.info("Bot paused.")
+
+    def resume(self):
+        """Riprende l'esecuzione del bot."""
+        self.paused = False
+        self.pause_event.set()
+        logging.info("Bot resumed.")
+
+    def monitor_counter_and_click(self, counter_by, counter_value, link, s, target="1"):
         """Monitora il contatore e clicca il pulsante appena raggiunge il target."""
         end_time = time.time() + s
-        # points = self.driver.find_element(By.ID, counter_value)
         cv = 0
         while time.time() < end_time or cv != 0:
+            self.pause_event.wait()  # Aspetta se il bot è in pausa
             try:
-                # Trova e legge il valore del contatore
                 counter_element = self.driver.find_element(counter_by, counter_value)
                 current_value = counter_element.text.strip()
                 cv = current_value
-
                 logging.info(f"Current counter value: {current_value}")
 
-                # Quando il contatore raggiunge il target, tenta di cliccare il pulsante
                 if current_value == target:
                     logging.info("Target value reached; attempting to click the button.")
-
-                    # Usa XPath o CSS Selector
                     try:
                         button_xpath = "//section[@class='auction-action-bid hidden-xs']//a[contains(text(), 'PUNTA')]"
                         bid_button = self.driver.find_element(By.XPATH, button_xpath)
                         bid_button.click()
-                        logging.info("Button clicked successfully via XPath.")
-                        logging.info("You win at url:",link)
+                        logging.info(f"Button clicked successfully at URL: {link}")
                     except Exception as e:
                         logging.warning("Bid button not found or failed to click. Retrying...")
 
-                time.sleep(0.05)
-
+                time.sleep(0.3)
             except Exception as e:
                 logging.error(f"Failed to monitor counter: {e}")
                 self.close()
-
-        logging.info("Target value not reached within duration.")
-        self.close()
-
-        # Polling loop in Python per monitorare il tempo
-        while time.time() < end_time:
-            try:
-                counter_element = self.driver.find_element(counter_by, counter_value)
-                current_value = counter_element.text.strip()
-                logging.info(f"Current counter value: {current_value}")
-
-                if current_value == target:
-                    logging.info("Target value reached; JavaScript is attempting to click the button repeatedly.")
-                    time.sleep(0.1)  # Breve pausa per lasciare agire il JavaScript
-            except Exception as e:
-                logging.error(f"Failed to monitor counter: {e}")
-                self.close()
-
-            time.sleep(0.1)
 
         logging.info("Target value not reached within duration.")
         self.close()
 
     def close(self):
-        """Chiudi il browser e termina il programma."""
         logging.info("Closing the browser and exiting the program.")
         self.driver.quit()
         sys.exit(10)
@@ -189,7 +169,6 @@ if __name__ == "__main__":
     driver_path = "C:\\chromedriver-win64\\chromedriver.exe"
     bot = WebBot(driver_path)
 
-    # Carica le credenziali dalla cache o chiedile all'utente
     cached_username, cached_password = bot.load_cached_credentials()
     if cached_username and cached_password:
         username, password = cached_username, cached_password
@@ -198,14 +177,25 @@ if __name__ == "__main__":
         password = getpass("Enter Password: ")
         bot.cache_credentials(username, password)
 
-    # Richiedi l'URL
     url = input("Insert URL: ")
     duration = int(input("How many seconds do you want to monitor the element? (e.g., 30): "))
+
+    # Avvia thread di controllo pausa/ripresa
+    def user_control():
+        while True:
+            cmd = input("Enter 'p' to pause, 'r' to resume: ").strip().lower()
+            if cmd == 'p':
+                bot.pause()
+            elif cmd == 'r':
+                bot.resume()
+
+    control_thread = threading.Thread(target=user_control)
+    control_thread.daemon = True
+    control_thread.start()
 
     # Vai all'URL e avvia il processo di login e monitoraggio
     bot.go_to_url(url)
     time.sleep(5)
-
     bot.fill_login_form(username, password)
     time.sleep(2)
     bot.click_login_button()
@@ -213,9 +203,7 @@ if __name__ == "__main__":
     bot.monitor_counter_and_click(
         counter_by=By.CLASS_NAME,
         counter_value="text-countdown-progressbar",
-        # button_selector=".bid-button.button-default.button-rounded.button-full.ripple-button.button-big-text.auction-btn-bid.button-mint-flat.bid-button-login.hidden-xs",
         link=url,
         s=duration,
         target="0",
     )
-
